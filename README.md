@@ -54,7 +54,7 @@ Add to your `~/.cursor/mcp.json`:
   "mcpServers": {
     "nanobanana": {
       "command": "node",
-      "args": ["C:\\Users\\woute\\Githubs\\MCP\\nanobanana-mcp\\dist\\index.js"],
+      "args": ["/path/to/nanobanana-mcp/dist/index.js"],
       "env": {
         "GEMINI_API_KEY": "your_api_key_here"
       }
@@ -76,7 +76,7 @@ Test uploading an image to Google Files API.
 **Example:**
 ```json
 {
-  "filePath": "C:\\Users\\woute\\Githubs\\MCP\\nanobanana-mcp\\test-image.jpg",
+  "filePath": "/path/to/test-image.jpg",
   "displayName": "My Test Image"
 }
 ```
@@ -98,7 +98,7 @@ Generate an image using Gemini Pro Image.
   "prompt": "A serene mountain landscape at sunset",
   "aspectRatio": "16:9",
   "imageSize": "2K",
-  "outputPath": "C:\\Users\\woute\\Pictures\\generated-image.png"
+  "outputPath": "/path/to/output/generated-image.png"
 }
 ```
 
@@ -106,10 +106,10 @@ Generate an image using Gemini Pro Image.
 ```json
 {
   "prompt": "Generate a portrait in this artistic style",
-  "referenceImagePath": "C:\\Users\\woute\\Githubs\\MCP\\nanobanana-mcp\\reference.jpg",
+  "referenceImagePath": "/path/to/reference.jpg",
   "aspectRatio": "1:1",
   "imageSize": "1K",
-  "outputPath": "C:\\Users\\woute\\Pictures\\styled-portrait.png"
+  "outputPath": "/path/to/output/styled-portrait.png"
 }
 ```
 
@@ -132,7 +132,7 @@ Delete an uploaded file from Google Files API.
 
 ```
 @nanobanana upload_test_image {
-  "filePath": "C:\\Users\\woute\\Githubs\\MCP\\nanobanana-mcp\\test.jpg"
+  "filePath": "/path/to/test.jpg"
 }
 ```
 
@@ -143,7 +143,7 @@ Delete an uploaded file from Google Files API.
   "prompt": "A cute banana character wearing sunglasses",
   "aspectRatio": "1:1",
   "imageSize": "1K",
-  "outputPath": "C:\\Users\\woute\\Pictures\\banana.png"
+  "outputPath": "/path/to/output/banana.png"
 }
 ```
 
@@ -152,10 +152,10 @@ Delete an uploaded file from Google Files API.
 ```
 @nanobanana generate_image {
   "prompt": "Create a hero image for a tech startup",
-  "referenceImagePath": "C:\\Users\\woute\\Githubs\\MCP\\nanobanana-mcp\\style-ref.png",
+  "referenceImagePath": "/path/to/style-ref.png",
   "aspectRatio": "16:9",
   "imageSize": "2K",
-  "outputPath": "C:\\Users\\woute\\Pictures\\hero.png"
+  "outputPath": "/path/to/output/hero.png"
 }
 ```
 
@@ -234,5 +234,5 @@ After testing upload:
 
 ---
 
-**Made with 🍌 by Wouter**
+**Open source AI image generation MCP**
 

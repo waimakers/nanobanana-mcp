@@ -16,7 +16,7 @@ Add to `~/.cursor/mcp.json`:
   "mcpServers": {
     "nanobanana": {
       "command": "node",
-      "args": ["C:\\Users\\woute\\Githubs\\MCP\\nanobanana-mcp\\dist\\index.js"],
+      "args": ["/path/to/nanobanana-mcp/dist/index.js"],
       "env": { "GEMINI_API_KEY": "your_key" }
     }
   }
@@ -38,7 +38,7 @@ Generate a modern tech logo in 1:1 format and save to Pictures folder
 ### With Style Reference (Token-Efficient!)
 
 ```
-Create a business card using this style: C:\Users\woute\Pictures\style.png
+Create a business card using this style: /path/to/style.png
 ```
 
 ### Multiple References
