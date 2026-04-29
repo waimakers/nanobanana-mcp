@@ -67,6 +67,143 @@ export interface GenerateImageResponse {
     promptTokenCount: number;
     candidatesTokenCount: number;
     totalTokenCount: number;
+    promptTokensDetails?: Array<{ modality: string; tokenCount: number }>;
+    candidatesTokensDetails?: Array<{ modality: string; tokenCount: number }>;
+  };
+}
+
+// Pricing snapshot, USD per 1M tokens.
+// Verified 2026-04-29 against:
+//   - https://ai.google.dev/gemini-api/docs/pricing
+//   - https://cloud.google.com/vertex-ai/generative-ai/pricing
+//   - https://openrouter.ai/google/gemini-3.1-flash-image-preview
+//   - https://openrouter.ai/google/gemini-3-pro-image-preview
+// Gemini bills image generation per token; per-image numbers are Google's
+// convenience reference (token_count × $/1M token rate).
+export const PRICING_SOURCE_DATE = "2026-04-29";
+
+interface GeminiTokenRates {
+  text_in_per_1m: number;
+  image_in_per_1m?: number;
+  text_out_per_1m?: number;
+  image_out_per_1m: number;
+  // Convenience reference: typical USD per generated image at common resolutions.
+  per_image_reference_usd?: Record<string, number>;
+  notes?: string;
+}
+
+const PRICING_PER_1M_TOKENS: Record<string, GeminiTokenRates> = {
+  "gemini-2.5-flash-image": {
+    text_in_per_1m: 0.30,
+    image_out_per_1m: 30.00,
+    per_image_reference_usd: { "1024": 0.039 },
+    notes: "Original Nano Banana. Flat ~1290 output tokens per 1024 image. Batch API = 50% off.",
+  },
+  "gemini-3-pro-image-preview": {
+    text_in_per_1m: 2.00,
+    image_in_per_1m: 2.00,
+    text_out_per_1m: 12.00,
+    image_out_per_1m: 120.00,
+    per_image_reference_usd: { "1K": 0.134, "2K": 0.134, "4K": 0.24 },
+    notes: "Nano Banana Pro. Resolution-tiered output tokens. Batch = 50% off.",
+  },
+  "gemini-3.1-flash-image-preview": {
+    text_in_per_1m: 0.50,
+    image_in_per_1m: 0.50,
+    text_out_per_1m: 3.00,
+    image_out_per_1m: 60.00,
+    per_image_reference_usd: { "0.5K": 0.045, "1K": 0.067, "2K": 0.101, "4K": 0.151 },
+    notes: "Nano Banana 2 (current default). 1680 tokens = 2K = $0.101.",
+  },
+  // Alias to Pro
+  "nano-banana-pro-preview": {
+    text_in_per_1m: 2.00,
+    image_in_per_1m: 2.00,
+    text_out_per_1m: 12.00,
+    image_out_per_1m: 120.00,
+    per_image_reference_usd: { "1K": 0.134, "2K": 0.134, "4K": 0.24 },
+    notes: "Alias for gemini-3-pro-image-preview.",
+  },
+};
+
+function round4(n: number): number {
+  return Number(n.toFixed(4));
+}
+
+export interface GeminiCostEstimate {
+  total: number;
+  breakdown: {
+    text_input_tokens: number;
+    image_input_tokens: number;
+    text_output_tokens: number;
+    image_output_tokens: number;
+    text_input_usd: number;
+    image_input_usd: number;
+    text_output_usd: number;
+    image_output_usd: number;
+    rates_per_1m_tokens: GeminiTokenRates;
+  };
+  pricing_source_date: string;
+  note: string;
+}
+
+/**
+ * Estimate USD cost from Gemini's usageMetadata.
+ * Gemini's API does NOT return a USD figure — this is a client-side
+ * calculation using verified per-token rates.
+ */
+export function estimateGeminiCost(
+  model: string,
+  usageMetadata: GenerateImageResponse["usageMetadata"]
+): GeminiCostEstimate | null {
+  if (!usageMetadata) return null;
+  const rates = PRICING_PER_1M_TOKENS[model];
+  if (!rates) return null;
+
+  // Pull per-modality token counts when available; fall back to totals.
+  const promptDetails = usageMetadata.promptTokensDetails ?? [];
+  const candidateDetails = usageMetadata.candidatesTokensDetails ?? [];
+
+  const sumByModality = (arr: any[], modality: string): number =>
+    arr
+      .filter((d) => d?.modality === modality)
+      .reduce((s, d) => s + (d.tokenCount ?? 0), 0);
+
+  let textIn = sumByModality(promptDetails, "TEXT");
+  let imageIn = sumByModality(promptDetails, "IMAGE");
+  if (textIn === 0 && imageIn === 0) {
+    textIn = usageMetadata.promptTokenCount ?? 0;
+  }
+
+  let imageOut = sumByModality(candidateDetails, "IMAGE");
+  let textOut = sumByModality(candidateDetails, "TEXT");
+  if (imageOut === 0 && textOut === 0) {
+    imageOut = usageMetadata.candidatesTokenCount ?? 0;
+  }
+
+  const textInUsd = (textIn / 1_000_000) * rates.text_in_per_1m;
+  const imageInUsd = (imageIn / 1_000_000) * (rates.image_in_per_1m ?? 0);
+  const textOutUsd = (textOut / 1_000_000) * (rates.text_out_per_1m ?? 0);
+  const imageOutUsd = (imageOut / 1_000_000) * rates.image_out_per_1m;
+
+  const total = textInUsd + imageInUsd + textOutUsd + imageOutUsd;
+
+  return {
+    total: round4(total),
+    breakdown: {
+      text_input_tokens: textIn,
+      image_input_tokens: imageIn,
+      text_output_tokens: textOut,
+      image_output_tokens: imageOut,
+      text_input_usd: round4(textInUsd),
+      image_input_usd: round4(imageInUsd),
+      text_output_usd: round4(textOutUsd),
+      image_output_usd: round4(imageOutUsd),
+      rates_per_1m_tokens: rates,
+    },
+    pricing_source_date: PRICING_SOURCE_DATE,
+    note:
+      "Estimate computed from Gemini usageMetadata × verified per-token rates. The Gemini API does not return USD; this is a client-side calculation.",
   };
 }
 
@@ -269,7 +406,7 @@ export class GeminiClient {
   /**
    * Generate an image using Nano Banana (token-efficient with reference images)
    */
-  async generateImage(request: GenerateImageRequest): Promise<GenerateImageResponse & { usedFileUris?: string[] }> {
+  async generateImage(request: GenerateImageRequest): Promise<GenerateImageResponse & { usedFileUris?: string[]; cost_estimate_usd?: GeminiCostEstimate | null }> {
     try {
       process.stderr.write(`\n🎨 Generating image with prompt: ${request.prompt}\n`);
 
@@ -335,10 +472,11 @@ export class GeminiClient {
       );
 
       process.stderr.write(`✅ Image generated successfully!\n`);
-      
+
       return {
         ...response.data,
         usedFileUris,
+        cost_estimate_usd: estimateGeminiCost(model, response.data.usageMetadata),
       };
     } catch (error) {
       if (axios.isAxiosError(error)) {
@@ -356,7 +494,7 @@ export class GeminiClient {
   /**
    * Edit an image (inpainting/outpainting with optional mask)
    */
-  async editImage(request: EditImageRequest): Promise<GenerateImageResponse & { usedFileUris?: string[] }> {
+  async editImage(request: EditImageRequest): Promise<GenerateImageResponse & { usedFileUris?: string[]; cost_estimate_usd?: GeminiCostEstimate | null }> {
     try {
       process.stderr.write(`\n✏️  Editing image with prompt: ${request.prompt}\n`);
 
@@ -423,10 +561,11 @@ export class GeminiClient {
       );
 
       process.stderr.write(`✅ Image edited successfully!\n`);
-      
+
       return {
         ...response.data,
         usedFileUris,
+        cost_estimate_usd: estimateGeminiCost(model, response.data.usageMetadata),
       };
     } catch (error) {
       if (axios.isAxiosError(error)) {

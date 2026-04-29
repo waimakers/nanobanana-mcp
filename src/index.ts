@@ -332,6 +332,7 @@ class NanobananaServer {
                   mimeType: imageData.mimeType,
                   sizeBytes: imageBuffer.length,
                   usedFileUris: result.usedFileUris || [],
+                  cost_estimate_usd: result.cost_estimate_usd,
                   usageMetadata: result.usageMetadata
                 }, null, 2),
               }],
@@ -346,6 +347,7 @@ class NanobananaServer {
                   mimeType: imageData.mimeType,
                   base64: imageData.data,
                   usedFileUris: result.usedFileUris || [],
+                  cost_estimate_usd: result.cost_estimate_usd,
                   usageMetadata: result.usageMetadata,
                   note: "Image returned as base64. Provide 'outputPath' to save to disk."
                 }, null, 2),
@@ -406,6 +408,7 @@ class NanobananaServer {
                   mimeType: imageData.mimeType,
                   sizeBytes: imageBuffer.length,
                   usedFileUris: result.usedFileUris || [],
+                  cost_estimate_usd: result.cost_estimate_usd,
                   usageMetadata: result.usageMetadata
                 }, null, 2),
               }],
@@ -420,6 +423,7 @@ class NanobananaServer {
                   mimeType: imageData.mimeType,
                   base64: imageData.data,
                   usedFileUris: result.usedFileUris || [],
+                  cost_estimate_usd: result.cost_estimate_usd,
                   usageMetadata: result.usageMetadata
                 }, null, 2),
               }],
