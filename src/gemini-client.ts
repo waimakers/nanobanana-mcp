@@ -430,7 +430,11 @@ export class GeminiClient {
       }
 
       // Select model
-      const model = request.model || 'nano-banana-pro-preview';
+      // Default to the explicit Pro model name. The legacy 'nano-banana-pro-preview'
+      // alias is resolved by Google's API to gemini-3.1-flash-image-preview (Flash 2),
+      // not gemini-3-pro-image-preview (the actual Pro flagship). Verified 2026-04-29
+      // by token count: Pro at 2K = 1120 tokens, Flash 2 at 2K = 1680 tokens.
+      const model = request.model || 'gemini-3-pro-image-preview';
       process.stderr.write(`Using model: ${model}\n`);
 
       // Build generation config
@@ -524,7 +528,11 @@ export class GeminiClient {
       }
 
       // Select model
-      const model = request.model || 'nano-banana-pro-preview';
+      // Default to the explicit Pro model name. The legacy 'nano-banana-pro-preview'
+      // alias is resolved by Google's API to gemini-3.1-flash-image-preview (Flash 2),
+      // not gemini-3-pro-image-preview (the actual Pro flagship). Verified 2026-04-29
+      // by token count: Pro at 2K = 1120 tokens, Flash 2 at 2K = 1680 tokens.
+      const model = request.model || 'gemini-3-pro-image-preview';
       process.stderr.write(`Using model: ${model}\n`);
 
       // Build generation config

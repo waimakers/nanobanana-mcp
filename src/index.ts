@@ -29,7 +29,7 @@ const TOOLS: Tool[] = [
         model: {
           type: "string",
           enum: ["gemini-2.5-flash-image", "gemini-3-pro-image-preview", "nano-banana-pro-preview"],
-          description: "Model to use for generation (default: nano-banana-pro-preview)"
+          description: "Model to use for generation (default: gemini-3-pro-image-preview = Nano Banana Pro flagship). The 'nano-banana-pro-preview' alias is broken in Google's API and resolves to Flash 2."
         },
         aspectRatio: {
           type: "string",
@@ -145,7 +145,7 @@ const TOOLS: Tool[] = [
         model: {
           type: "string",
           enum: ["gemini-2.5-flash-image", "gemini-3-pro-image-preview", "nano-banana-pro-preview"],
-          description: "Model to use (default: nano-banana-pro-preview)"
+          description: "Model to use (default: gemini-3-pro-image-preview = Nano Banana Pro flagship)"
         },
         aspectRatio: {
           type: "string",
