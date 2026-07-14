@@ -126,6 +126,34 @@ const PRICING_PER_1M_TOKENS: Record<string, GeminiTokenRates> = {
   },
 };
 
+/**
+ * Model aliases that must be rewritten before the name reaches Google's API.
+ *
+ * `nano-banana-pro-preview` LOOKS like the Pro flagship and is documented
+ * everywhere as "Nano Banana Pro", but Google's API resolves it to
+ * gemini-3.1-flash-image-preview (Flash 2) — a weaker model — and returns NO
+ * error. Callers silently get downgraded art.
+ *
+ * Verified by output-token count at 2K: Pro = 1120 tokens, Flash 2 = 1680.
+ * (2026-04-29, re-confirmed 2026-07-14.)
+ *
+ * The default was previously pointed at Pro, but that only helped callers who
+ * passed no model at all. Anything naming the alias explicitly — which is what
+ * most of our skills do — still went to Flash 2. Hence this map: it is applied
+ * to the EXPLICIT model too, which is the whole point.
+ */
+const MODEL_ALIASES: Record<string, string> = {
+  'nano-banana-pro-preview': 'gemini-3-pro-image-preview',
+};
+
+export const DEFAULT_MODEL = 'gemini-3-pro-image-preview';
+
+/** Resolve a requested model name to the one we actually want to hit. */
+export function resolveModel(requested?: string): string {
+  const name = requested || DEFAULT_MODEL;
+  return MODEL_ALIASES[name] ?? name;
+}
+
 function round4(n: number): number {
   return Number(n.toFixed(4));
 }
@@ -429,12 +457,10 @@ export class GeminiClient {
         }
       }
 
-      // Select model
-      // Default to the explicit Pro model name. The legacy 'nano-banana-pro-preview'
-      // alias is resolved by Google's API to gemini-3.1-flash-image-preview (Flash 2),
-      // not gemini-3-pro-image-preview (the actual Pro flagship). Verified 2026-04-29
-      // by token count: Pro at 2K = 1120 tokens, Flash 2 at 2K = 1680 tokens.
-      const model = request.model || 'gemini-3-pro-image-preview';
+      // Select model. Fixing only the DEFAULT was not enough: a caller that
+      // explicitly names the legacy alias still got the weak model, because we
+      // passed the name through verbatim. resolveModel() maps it. See MODEL_ALIASES.
+      const model = resolveModel(request.model);
       process.stderr.write(`Using model: ${model}\n`);
 
       // Build generation config
@@ -443,9 +469,10 @@ export class GeminiClient {
         imageSize: request.imageSize || '2K',
       };
 
-      if (request.mimeType) {
-        imageConfig.outputMimeType = request.mimeType;
-      }
+      // Do NOT send outputMimeType. Google rejects it inside image_config
+      // ("Unknown name \"outputMimeType\" at 'generation_config.image_config'")
+      // and the entire call fails. `mimeType` is still accepted on the request for
+      // backwards compatibility, but is deliberately not forwarded to the API.
 
       const generationConfig: any = {
         responseModalities: ['IMAGE'],
@@ -527,12 +554,10 @@ export class GeminiClient {
         usedFileUris.push(maskResolved.fileUri);
       }
 
-      // Select model
-      // Default to the explicit Pro model name. The legacy 'nano-banana-pro-preview'
-      // alias is resolved by Google's API to gemini-3.1-flash-image-preview (Flash 2),
-      // not gemini-3-pro-image-preview (the actual Pro flagship). Verified 2026-04-29
-      // by token count: Pro at 2K = 1120 tokens, Flash 2 at 2K = 1680 tokens.
-      const model = request.model || 'gemini-3-pro-image-preview';
+      // Select model. Fixing only the DEFAULT was not enough: a caller that
+      // explicitly names the legacy alias still got the weak model, because we
+      // passed the name through verbatim. resolveModel() maps it. See MODEL_ALIASES.
+      const model = resolveModel(request.model);
       process.stderr.write(`Using model: ${model}\n`);
 
       // Build generation config
@@ -541,9 +566,10 @@ export class GeminiClient {
         imageSize: request.imageSize || '2K',
       };
 
-      if (request.mimeType) {
-        imageConfig.outputMimeType = request.mimeType;
-      }
+      // Do NOT send outputMimeType. Google rejects it inside image_config
+      // ("Unknown name \"outputMimeType\" at 'generation_config.image_config'")
+      // and the entire call fails. `mimeType` is still accepted on the request for
+      // backwards compatibility, but is deliberately not forwarded to the API.
 
       const generationConfig: any = {
         responseModalities: ['IMAGE'],
