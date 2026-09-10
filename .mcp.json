@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "nanobanana": {
+      "command": "node",
+      "args": [
+        "dist/index.js"
+      ],
+      "env": {
+        "GEMINI_IMAGE_API_KEY": "${NANOBANANA_COHORT_API_KEY}",
+        "NANOBANANA_DEFAULT_MODEL": "gemini-3.1-flash-image",
+        "NANOBANANA_DEFAULT_IMAGE_SIZE": "1K",
+        "NANOBANANA_WORKSPACE_ROOT": ".",
+        "NANOBANANA_ALLOW_OVERWRITE": "0"
+      }
+    }
+  }
+}

@@ -1,238 +1,84 @@
-# 🍌 Nanobanana MCP Server
+# Nanobanana MCP
 
-MCP server for Google's **Gemini Pro Image** (Nanobanana) API - AI-powered image generation with style reference support.
+A local stdio MCP server for Gemini image generation and generative image editing. It runs on the participant's computer and calls Google's Gemini API directly. It is intentionally `private` in `package.json`, so it cannot be accidentally published to npm.
 
-## ✨ Features
+## Install for a workshop cohort
 
-- 🎨 **Image Generation** - Create images from text prompts
-- 🖼️ **Style Transfer** - Use reference images for style guidance
-- 📤 **File Upload** - Automatic upload of reference images to Google Files API
-- 🔄 **Multiple Formats** - Support for various aspect ratios and sizes
-- 💾 **Save to Disk** - Option to save generated images directly
+This repository includes a project-scoped [`.mcp.json`](.mcp.json) for Claude Code. It deliberately maps a dedicated cohort variable to the server's preferred key variable, so a missing cohort key fails instead of inheriting an unrelated personal key.
 
-## 🚀 Quick Start
-
-### 1. Installation
+Install Node.js 22 or newer and Git. Clone the repository, enter it, then install and build it:
 
 ```bash
+git clone https://github.com/waimakers/nanobanana-mcp.git
 cd nanobanana-mcp
-npm install
+npm ci
 npm run build
 ```
 
-### 2. Get Your API Key
+Set the cohort key outside the repository. On macOS and Linux with zsh:
 
-1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey)
-2. Create a new API key
-3. Copy the key
+```zsh
+export NANOBANANA_COHORT_API_KEY="your-dedicated-cohort-key"
+claude
+```
 
-### 3. Configure Environment
+On Windows PowerShell:
+
+```powershell
+$env:NANOBANANA_COHORT_API_KEY = "your-dedicated-cohort-key"
+claude
+```
+
+Claude Code loads this repository's project-scoped `.mcp.json`; approve that project configuration when prompted. It maps the dedicated cohort variable to `GEMINI_IMAGE_API_KEY`, and configures Flash/1K only for the cohort. The server supports `GEMINI_IMAGE_API_KEY` first and `GEMINI_API_KEY` as a general fallback. It does not read `.env` files and never contains a real key.
+
+To use the server from a different workspace, add an MCP entry with an absolute `dist/index.js` path and the same environment mappings from [`.mcp.json`](.mcp.json). Do not copy a key into the tracked configuration or `environment.template`.
+
+The cohort key is a shared Google API credential. It does not authenticate participants individually, enforce Microsoft sign-in, or allocate individual quotas. Everyone using it can consume the same Google billing project. `list_uploaded_files` and `delete_uploaded_file` operate on files visible to that key, so use them with care and avoid uploading sensitive material.
+
+## Models and defaults
+
+The established default remains `gemini-3-pro-image-preview` at `2K`, preserving existing callers. The historical `nano-banana-pro-preview` option continues to mean that same Pro preview endpoint. No model name silently falls back to another model.
+
+For a cost-conscious workshop default, set both variables before starting the MCP client:
 
 ```bash
-cp environment.template .env
+export NANOBANANA_DEFAULT_MODEL="gemini-3.1-flash-image"
+export NANOBANANA_DEFAULT_IMAGE_SIZE="1K"
 ```
 
-Edit `.env` and add your API key:
+| Model | Status | Sizes |
+| --- | --- | --- |
+| `gemini-3.1-flash-image` | Stable; fast general-purpose Nano Banana 2 | `0.5K`, `1K`, `2K`, `4K` |
+| `gemini-3-pro-image` | Stable; Nano Banana Pro quality | `1K`, `2K`, `4K` |
+| `gemini-3.1-flash-lite-image` | Stable; efficient Nano Banana 2 Lite | `1K` |
+| `gemini-3.1-flash-image-preview`, `gemini-3-pro-image-preview`, `gemini-2.5-flash-image` | Retained compatibility options | Validated per model |
 
-```env
-GEMINI_API_KEY=your_api_key_here
-DEBUG=false
-```
+Sizes and aspect ratios are checked locally before any provider call. Gemini 2.5 Flash Image has fixed approximately-1K output, so the server omits `imageSize` from its provider request. The `get_model_capabilities` tool reports each accepted combination.
 
-### 4. Test the Server
+Google's current [image generation guide](https://ai.google.dev/gemini-api/docs/image-generation) and [pricing page](https://ai.google.dev/gemini-api/docs/pricing) are the source of truth. Cost estimates returned by this server use provider usage metadata and a dated pricing snapshot; they are estimates, not invoices.
+
+## Tools
+
+- `generate_image`: prompt plus up to five reference images.
+- `edit_image`: prompt, input image, and optional mask image.
+- `upload_image`, `list_uploaded_files`, `delete_uploaded_file`: Google Files API utilities.
+- `get_model_capabilities`: exact accepted model options and active defaults.
+
+Reference images and `maskImage` are generative guidance. Gemini does not expose a pixel-exact inpainting mask, deterministic style strength, or output-encoding switch through this API. For compatibility, `mimeType`, `referenceMode`, and `referenceStrength` are accepted but not forwarded. `seed` is forwarded; `negativeSeed` is never forwarded.
+
+## Boundaries and troubleshooting
+
+The cohort configuration sets `NANOBANANA_WORKSPACE_ROOT` to `.`. Start the client in your exercise workspace; local input and output paths must stay inside it, including symlink targets. Copy reference images into that directory and use paths such as `input.png` or `generated/poster.png`. For a different workspace, configure its absolute root. Installations that omit this variable retain access to the host filesystem. This is an application guard, not an operating-system sandbox.
+
+Existing output files are rejected before generation by default. Choose a new filename, or deliberately set `NANOBANANA_ALLOW_OVERWRITE=1` if overwriting is required. These local settings do not enforce billing or participant access controls: holders of a shared key can use it outside this server.
+
+The server enforces a 60-second request timeout, five references, and 10 MiB per reference. Provider JSON responses have a separate 64 MiB limit for base64-encoded generated images. Existing file references must use a `files/...` name or its full Google Files API URI. HTTPS URL downloads only allow public addresses on port 443, validate the addresses used by the socket, and disable redirects and proxy environment variables. References must have a supported PNG, JPEG, GIF or WebP signature. Provider response bodies, request headers, prompts, local paths, and API keys are not logged or included in provider errors. It never automatically retries a paid image generation call. File uploads use Google’s two-step resumable protocol.
+
+If a request reports no image, Gemini may have blocked or declined it. Try a different prompt; the server does not invent a fallback image. If a configured model/size pair is rejected, use `get_model_capabilities` or choose a supported pair.
+
+Run the local checks without calling Gemini:
 
 ```bash
-npm start
+npm test
+npm audit --omit=dev
 ```
-
-## 🔧 MCP Configuration
-
-Add to your `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "nanobanana": {
-      "command": "node",
-      "args": ["/path/to/nanobanana-mcp/dist/index.js"],
-      "env": {
-        "GEMINI_API_KEY": "your_api_key_here"
-      }
-    }
-  }
-}
-```
-
-## 🛠️ Available Tools
-
-### 1. `upload_test_image`
-
-Test uploading an image to Google Files API.
-
-**Parameters:**
-- `filePath` (string, required) - Absolute path to the image file
-- `displayName` (string, optional) - Display name for the file
-
-**Example:**
-```json
-{
-  "filePath": "/path/to/test-image.jpg",
-  "displayName": "My Test Image"
-}
-```
-
-### 2. `generate_image`
-
-Generate an image using Gemini Pro Image.
-
-**Parameters:**
-- `prompt` (string, required) - Text description of the image
-- `referenceImagePath` (string, optional) - Path to reference image for style
-- `aspectRatio` (string, optional) - One of: `1:1`, `16:9`, `9:16`, `3:4`, `4:3`
-- `imageSize` (string, optional) - One of: `256x256`, `512x512`, `1K`, `2K`, `4K`
-- `outputPath` (string, optional) - Where to save the generated image
-
-**Example:**
-```json
-{
-  "prompt": "A serene mountain landscape at sunset",
-  "aspectRatio": "16:9",
-  "imageSize": "2K",
-  "outputPath": "/path/to/output/generated-image.png"
-}
-```
-
-**With reference image:**
-```json
-{
-  "prompt": "Generate a portrait in this artistic style",
-  "referenceImagePath": "/path/to/reference.jpg",
-  "aspectRatio": "1:1",
-  "imageSize": "1K",
-  "outputPath": "/path/to/output/styled-portrait.png"
-}
-```
-
-### 3. `list_uploaded_files`
-
-List all files uploaded to Google Files API.
-
-**Parameters:** None
-
-### 4. `delete_uploaded_file`
-
-Delete an uploaded file from Google Files API.
-
-**Parameters:**
-- `fileName` (string, required) - File name to delete (e.g., `files/abc123`)
-
-## 📝 Usage Examples
-
-### Test File Upload
-
-```
-@nanobanana upload_test_image {
-  "filePath": "/path/to/test.jpg"
-}
-```
-
-### Generate Simple Image
-
-```
-@nanobanana generate_image {
-  "prompt": "A cute banana character wearing sunglasses",
-  "aspectRatio": "1:1",
-  "imageSize": "1K",
-  "outputPath": "/path/to/output/banana.png"
-}
-```
-
-### Generate with Style Reference
-
-```
-@nanobanana generate_image {
-  "prompt": "Create a hero image for a tech startup",
-  "referenceImagePath": "/path/to/style-ref.png",
-  "aspectRatio": "16:9",
-  "imageSize": "2K",
-  "outputPath": "/path/to/output/hero.png"
-}
-```
-
-### Natural Language Prompts
-
-```
-Generate an image of a futuristic city at night in 16:9 format
-Create a logo inspired by my reference image
-Upload my test image and show me the file URI
-```
-
-## 🎯 How It Works
-
-1. **File Upload Flow**:
-   - When you provide a `referenceImagePath`, the server automatically uploads it to Google Files API
-   - The upload returns a `fileUri` (e.g., `files/abc123`)
-   - This URI is included in the image generation request
-
-2. **Image Generation**:
-   - Sends your prompt + optional reference to Gemini Pro Image
-   - Receives base64-encoded image data
-   - Optionally saves to disk if `outputPath` provided
-
-3. **Authentication**:
-   - Uses your API key for all requests
-   - Both Files API and Gemini API use the same key
-   - No OAuth setup needed!
-
-## 🔒 Security Notes
-
-- **Never commit your API key** - It's in `.gitignore`
-- **Regenerate keys** if exposed in chat/logs
-- **Files API scope** - Uploaded files are tied to your project
-- **File expiration** - Uploaded files have TTL (shown in response)
-
-## 📊 API Limits
-
-- **Free tier**: 15 requests per minute
-- **File size**: Up to 20MB per file
-- **Supported formats**: JPEG, PNG, GIF, WebP, BMP
-
-## 🆘 Troubleshooting
-
-**Error: "API key not found"**
-- Check `.env` file exists and has correct key
-- Restart Cursor after updating `mcp.json`
-
-**Error: "File upload failed"**
-- Verify file path is absolute
-- Check file format is supported
-- Ensure file size is under 20MB
-
-**Error: "Invalid API key"**
-- Regenerate key at [AI Studio](https://aistudio.google.com/app/apikey)
-- Update both `.env` and `mcp.json`
-
-**Image generation is slow**
-- Larger sizes (`2K`, `4K`) take longer
-- Style reference adds processing time
-- First request may be slower (cold start)
-
-## 📚 Resources
-
-- [Google AI Studio](https://aistudio.google.com/)
-- [Gemini API Docs](https://ai.google.dev/gemini-api/docs)
-- [Files API Guide](https://ai.google.dev/gemini-api/docs/files)
-- [Image Generation Cookbook](https://github.com/google-gemini/cookbook)
-
-## 🎉 Next Steps
-
-After testing upload:
-- Try generating simple images
-- Experiment with style references
-- Adjust aspect ratios and sizes
-- Integrate into your workflow!
-
----
-
-**Open source AI image generation MCP**
-

@@ -1,633 +1,654 @@
-import axios, { AxiosInstance } from 'axios';
-import FormData from 'form-data';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as crypto from 'crypto';
+import axios, { AxiosInstance } from "axios";
+import * as crypto from "node:crypto";
+import * as path from "node:path";
+import { createPublicImageAgent, imageMimeType, readLocalImage, validatePublicImageUrl } from "./io-safety.js";
 
-export interface UploadFileResponse {
-  file: {
-    name: string;
-    displayName?: string;
-    mimeType: string;
-    sizeBytes: string;
-    createTime: string;
-    updateTime: string;
-    expirationTime: string;
-    sha256Hash: string;
-    uri: string;
-    state: string;
-  };
-}
+export const MAX_PROMPT_CHARS = 20_000;
+export const MAX_REFERENCE_IMAGES = 5;
+export const MAX_REFERENCE_BYTES = 10 * 1024 * 1024;
+export const REQUEST_TIMEOUT_MS = 60_000;
+// Generated 4K images are returned as base64 JSON, larger than reference inputs.
+export const MAX_PROVIDER_RESPONSE_BYTES = 64 * 1024 * 1024;
+
+export const IMAGE_MODELS = [
+  "gemini-2.5-flash-image",
+  "gemini-3-pro-image-preview",
+  "nano-banana-pro-preview",
+  "gemini-3.1-flash-image-preview",
+  "gemini-3.1-flash-image",
+  "gemini-3-pro-image",
+  "gemini-3.1-flash-lite-image",
+] as const;
+export type ImageModel = (typeof IMAGE_MODELS)[number];
+export type AspectRatio =
+  | "1:1"
+  | "1:4"
+  | "1:8"
+  | "2:3"
+  | "3:2"
+  | "3:4"
+  | "4:1"
+  | "4:3"
+  | "4:5"
+  | "5:4"
+  | "8:1"
+  | "9:16"
+  | "16:9"
+  | "21:9";
+export type ImageSize = "0.5K" | "1K" | "2K" | "4K";
+export const COMMON_ASPECT_RATIOS: readonly AspectRatio[] = [
+  "1:1",
+  "2:3",
+  "3:2",
+  "3:4",
+  "4:3",
+  "4:5",
+  "5:4",
+  "9:16",
+  "16:9",
+  "21:9",
+];
+export const GEMINI_31_FLASH_ASPECT_RATIOS: readonly AspectRatio[] = [
+  ...COMMON_ASPECT_RATIOS,
+  "1:4",
+  "1:8",
+  "4:1",
+  "8:1",
+];
 
 export interface ReferenceImage {
-  source: 'url' | 'file_uri' | 'inline' | 'file_path';
+  source: "url" | "file_uri" | "inline" | "file_path";
   url?: string;
   fileUri?: string;
   filePath?: string;
   mimeType?: string;
   base64?: string;
 }
-
 export interface GenerateImageRequest {
   prompt: string;
-  model?: 'gemini-2.5-flash-image' | 'gemini-3-pro-image-preview' | 'nano-banana-pro-preview';
-  aspectRatio?: '1:1' | '16:9' | '9:16' | '3:4' | '4:3';
-  imageSize?: '256x256' | '512x512' | '1K' | '2K' | '4K';
-  mimeType?: 'image/png' | 'image/jpeg';
+  model?: ImageModel;
+  aspectRatio?: AspectRatio;
+  imageSize?: ImageSize;
+  mimeType?: "image/png" | "image/jpeg";
   seed?: number;
   negativeSeed?: number;
   referenceImages?: ReferenceImage[];
-  referenceMode?: 'style' | 'identity' | 'composition' | 'auto';
+  referenceMode?: "style" | "identity" | "composition" | "auto";
   referenceStrength?: number;
 }
-
 export interface EditImageRequest {
   prompt: string;
   inputImage: ReferenceImage;
   maskImage?: ReferenceImage;
-  model?: 'gemini-2.5-flash-image' | 'gemini-3-pro-image-preview' | 'nano-banana-pro-preview';
-  aspectRatio?: '1:1' | '16:9' | '9:16' | '3:4' | '4:3';
-  imageSize?: '256x256' | '512x512' | '1K' | '2K' | '4K';
-  mimeType?: 'image/png' | 'image/jpeg';
+  model?: ImageModel;
+  aspectRatio?: AspectRatio;
+  imageSize?: ImageSize;
+  mimeType?: "image/png" | "image/jpeg";
   seed?: number;
 }
-
+export interface UploadFileResponse {
+  file: {
+    name: string;
+    displayName?: string;
+    mimeType: string;
+    sizeBytes: string;
+    expirationTime?: string;
+    uri: string;
+    state?: string;
+  };
+}
 export interface GenerateImageResponse {
-  candidates: Array<{
-    content: {
-      parts: Array<{
-        inlineData?: {
-          mimeType: string;
-          data: string; // base64
-        };
-      }>;
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{ inlineData?: { mimeType: string; data: string } }>;
     };
   }>;
   usageMetadata?: {
-    promptTokenCount: number;
-    candidatesTokenCount: number;
-    totalTokenCount: number;
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    thoughtsTokenCount?: number;
+    totalTokenCount?: number;
     promptTokensDetails?: Array<{ modality: string; tokenCount: number }>;
     candidatesTokensDetails?: Array<{ modality: string; tokenCount: number }>;
   };
 }
 
-// Pricing snapshot, USD per 1M tokens.
-// Verified 2026-04-29 against:
-//   - https://ai.google.dev/gemini-api/docs/pricing
-//   - https://cloud.google.com/vertex-ai/generative-ai/pricing
-//   - https://openrouter.ai/google/gemini-3.1-flash-image-preview
-//   - https://openrouter.ai/google/gemini-3-pro-image-preview
-// Gemini bills image generation per token; per-image numbers are Google's
-// convenience reference (token_count × $/1M token rate).
-export const PRICING_SOURCE_DATE = "2026-04-29";
-
-interface GeminiTokenRates {
-  text_in_per_1m: number;
-  image_in_per_1m?: number;
-  text_out_per_1m?: number;
-  image_out_per_1m: number;
-  // Convenience reference: typical USD per generated image at common resolutions.
-  per_image_reference_usd?: Record<string, number>;
-  notes?: string;
+interface ModelCapabilities {
+  displayName: string;
+  sizes: readonly ImageSize[];
+  aspectRatios: readonly AspectRatio[];
+  preview?: boolean;
 }
-
-const PRICING_PER_1M_TOKENS: Record<string, GeminiTokenRates> = {
+export const MODEL_CAPABILITIES: Record<
+  Exclude<ImageModel, "nano-banana-pro-preview">,
+  ModelCapabilities
+> = {
   "gemini-2.5-flash-image": {
-    text_in_per_1m: 0.30,
-    image_out_per_1m: 30.00,
-    per_image_reference_usd: { "1024": 0.039 },
-    notes: "Original Nano Banana. Flat ~1290 output tokens per 1024 image. Batch API = 50% off.",
+    displayName: "Gemini 2.5 Flash Image",
+    sizes: ["1K"],
+    aspectRatios: COMMON_ASPECT_RATIOS,
   },
   "gemini-3-pro-image-preview": {
-    text_in_per_1m: 2.00,
-    image_in_per_1m: 2.00,
-    text_out_per_1m: 12.00,
-    image_out_per_1m: 120.00,
-    per_image_reference_usd: { "1K": 0.134, "2K": 0.134, "4K": 0.24 },
-    notes: "Nano Banana Pro. Resolution-tiered output tokens. Batch = 50% off.",
+    displayName: "Gemini 3 Pro Image (Preview)",
+    sizes: ["1K", "2K", "4K"],
+    aspectRatios: COMMON_ASPECT_RATIOS,
+    preview: true,
   },
   "gemini-3.1-flash-image-preview": {
-    text_in_per_1m: 0.50,
-    image_in_per_1m: 0.50,
-    text_out_per_1m: 3.00,
-    image_out_per_1m: 60.00,
-    per_image_reference_usd: { "0.5K": 0.045, "1K": 0.067, "2K": 0.101, "4K": 0.151 },
-    notes: "Nano Banana 2 (current default). 1680 tokens = 2K = $0.101.",
+    displayName: "Gemini 3.1 Flash Image (Preview)",
+    sizes: ["0.5K", "1K", "2K", "4K"],
+    aspectRatios: GEMINI_31_FLASH_ASPECT_RATIOS,
+    preview: true,
   },
-  // Alias to Pro
-  "nano-banana-pro-preview": {
-    text_in_per_1m: 2.00,
-    image_in_per_1m: 2.00,
-    text_out_per_1m: 12.00,
-    image_out_per_1m: 120.00,
-    per_image_reference_usd: { "1K": 0.134, "2K": 0.134, "4K": 0.24 },
-    notes: "Alias for gemini-3-pro-image-preview.",
+  "gemini-3.1-flash-image": {
+    displayName: "Gemini 3.1 Flash Image (Nano Banana 2)",
+    sizes: ["0.5K", "1K", "2K", "4K"],
+    aspectRatios: GEMINI_31_FLASH_ASPECT_RATIOS,
+  },
+  "gemini-3-pro-image": {
+    displayName: "Gemini 3 Pro Image (Nano Banana Pro)",
+    sizes: ["1K", "2K", "4K"],
+    aspectRatios: COMMON_ASPECT_RATIOS,
+  },
+  "gemini-3.1-flash-lite-image": {
+    displayName: "Gemini 3.1 Flash Lite Image (Nano Banana 2 Lite)",
+    sizes: ["1K"],
+    aspectRatios: COMMON_ASPECT_RATIOS,
   },
 };
+/** Legacy meaning is preserved: this public alias maps to Google's Pro preview endpoint. */
+export const MODEL_ALIASES: Readonly<
+  Record<string, Exclude<ImageModel, "nano-banana-pro-preview">>
+> = { "nano-banana-pro-preview": "gemini-3-pro-image-preview" };
+export const DEFAULT_MODEL: Exclude<ImageModel, "nano-banana-pro-preview"> =
+  "gemini-3-pro-image-preview";
+export const DEFAULT_IMAGE_SIZE: ImageSize = "2K";
+export const DEFAULT_ASPECT_RATIO: AspectRatio = "16:9";
+export interface RuntimeDefaults {
+  model: Exclude<ImageModel, "nano-banana-pro-preview">;
+  imageSize: ImageSize;
+}
 
-/**
- * Model aliases that must be rewritten before the name reaches Google's API.
- *
- * `nano-banana-pro-preview` LOOKS like the Pro flagship and is documented
- * everywhere as "Nano Banana Pro", but Google's API resolves it to
- * gemini-3.1-flash-image-preview (Flash 2) — a weaker model — and returns NO
- * error. Callers silently get downgraded art.
- *
- * Verified by output-token count at 2K: Pro = 1120 tokens, Flash 2 = 1680.
- * (2026-04-29, re-confirmed 2026-07-14.)
- *
- * The default was previously pointed at Pro, but that only helped callers who
- * passed no model at all. Anything naming the alias explicitly — which is what
- * most of our skills do — still went to Flash 2. Hence this map: it is applied
- * to the EXPLICIT model too, which is the whole point.
- */
-const MODEL_ALIASES: Record<string, string> = {
-  'nano-banana-pro-preview': 'gemini-3-pro-image-preview',
+export function resolveModel(
+  model?: string,
+): Exclude<ImageModel, "nano-banana-pro-preview"> {
+  const requested = model ?? DEFAULT_MODEL;
+  const resolved = Object.hasOwn(MODEL_ALIASES, requested)
+    ? MODEL_ALIASES[requested]
+    : requested;
+  if (!Object.hasOwn(MODEL_CAPABILITIES, resolved))
+    throw new Error(
+      `Unsupported model. Use one of: ${IMAGE_MODELS.join(", ")}`,
+    );
+  return resolved as Exclude<ImageModel, "nano-banana-pro-preview">;
+}
+export function getRuntimeDefaults(
+  env: NodeJS.ProcessEnv = process.env,
+): RuntimeDefaults {
+  const model = resolveModel(env.NANOBANANA_DEFAULT_MODEL);
+  const imageSize = (env.NANOBANANA_DEFAULT_IMAGE_SIZE ??
+    DEFAULT_IMAGE_SIZE) as ImageSize;
+  if (!MODEL_CAPABILITIES[model].sizes.includes(imageSize))
+    throw new Error(
+      `NANOBANANA_DEFAULT_IMAGE_SIZE is not supported by NANOBANANA_DEFAULT_MODEL`,
+    );
+  return { model, imageSize };
+}
+
+const RATES: Record<
+  string,
+  {
+    text_in_per_1m: number;
+    image_in_per_1m?: number;
+    text_out_per_1m?: number;
+    image_out_per_1m: number;
+  }
+> = {
+  "gemini-2.5-flash-image": {
+    text_in_per_1m: 0.3,
+    image_in_per_1m: 0.3,
+    image_out_per_1m: 30,
+  },
+  "gemini-3-pro-image-preview": {
+    text_in_per_1m: 2,
+    image_in_per_1m: 2,
+    text_out_per_1m: 12,
+    image_out_per_1m: 120,
+  },
+  "gemini-3-pro-image": {
+    text_in_per_1m: 2,
+    image_in_per_1m: 2,
+    text_out_per_1m: 12,
+    image_out_per_1m: 120,
+  },
+  "gemini-3.1-flash-image-preview": {
+    text_in_per_1m: 0.5,
+    image_in_per_1m: 0.5,
+    text_out_per_1m: 3,
+    image_out_per_1m: 60,
+  },
+  "gemini-3.1-flash-image": {
+    text_in_per_1m: 0.5,
+    image_in_per_1m: 0.5,
+    text_out_per_1m: 3,
+    image_out_per_1m: 60,
+  },
+  "gemini-3.1-flash-lite-image": {
+    text_in_per_1m: 0.25,
+    image_in_per_1m: 0.25,
+    text_out_per_1m: 1.5,
+    image_out_per_1m: 30,
+  },
 };
-
-export const DEFAULT_MODEL = 'gemini-3-pro-image-preview';
-
-/** Resolve a requested model name to the one we actually want to hit. */
-export function resolveModel(requested?: string): string {
-  const name = requested || DEFAULT_MODEL;
-  return MODEL_ALIASES[name] ?? name;
-}
-
-function round4(n: number): number {
-  return Number(n.toFixed(4));
-}
-
-export interface GeminiCostEstimate {
-  total: number;
-  breakdown: {
-    text_input_tokens: number;
-    image_input_tokens: number;
-    text_output_tokens: number;
-    image_output_tokens: number;
-    text_input_usd: number;
-    image_input_usd: number;
-    text_output_usd: number;
-    image_output_usd: number;
-    rates_per_1m_tokens: GeminiTokenRates;
-  };
-  pricing_source_date: string;
-  note: string;
-}
-
-/**
- * Estimate USD cost from Gemini's usageMetadata.
- * Gemini's API does NOT return a USD figure — this is a client-side
- * calculation using verified per-token rates.
- */
+export const PRICING_SOURCE_DATE = "2026-09-10";
 export function estimateGeminiCost(
   model: string,
-  usageMetadata: GenerateImageResponse["usageMetadata"]
-): GeminiCostEstimate | null {
-  if (!usageMetadata) return null;
-  const rates = PRICING_PER_1M_TOKENS[model];
-  if (!rates) return null;
-
-  // Pull per-modality token counts when available; fall back to totals.
-  const promptDetails = usageMetadata.promptTokensDetails ?? [];
-  const candidateDetails = usageMetadata.candidatesTokensDetails ?? [];
-
-  const sumByModality = (arr: any[], modality: string): number =>
-    arr
-      .filter((d) => d?.modality === modality)
-      .reduce((s, d) => s + (d.tokenCount ?? 0), 0);
-
-  let textIn = sumByModality(promptDetails, "TEXT");
-  let imageIn = sumByModality(promptDetails, "IMAGE");
-  if (textIn === 0 && imageIn === 0) {
-    textIn = usageMetadata.promptTokenCount ?? 0;
-  }
-
-  let imageOut = sumByModality(candidateDetails, "IMAGE");
-  let textOut = sumByModality(candidateDetails, "TEXT");
-  if (imageOut === 0 && textOut === 0) {
-    imageOut = usageMetadata.candidatesTokenCount ?? 0;
-  }
-
-  const textInUsd = (textIn / 1_000_000) * rates.text_in_per_1m;
-  const imageInUsd = (imageIn / 1_000_000) * (rates.image_in_per_1m ?? 0);
-  const textOutUsd = (textOut / 1_000_000) * (rates.text_out_per_1m ?? 0);
-  const imageOutUsd = (imageOut / 1_000_000) * rates.image_out_per_1m;
-
-  const total = textInUsd + imageInUsd + textOutUsd + imageOutUsd;
-
+  usage?: GenerateImageResponse["usageMetadata"],
+) {
+  const rates = RATES[model];
+  if (!rates || !usage) return null;
+  const sum = (
+    rows: Array<{ modality: string; tokenCount: number }> | undefined,
+    modality: string,
+  ) =>
+    (rows ?? [])
+      .filter((row) => row.modality === modality)
+      .reduce((n, row) => n + row.tokenCount, 0);
+  let textIn = sum(usage.promptTokensDetails, "TEXT");
+  let imageIn = sum(usage.promptTokensDetails, "IMAGE");
+  if (!textIn && !imageIn) textIn = usage.promptTokenCount ?? 0;
+  const candidateText = sum(usage.candidatesTokensDetails, "TEXT");
+  const textOut = candidateText + (usage.thoughtsTokenCount ?? 0);
+  let imageOut = sum(usage.candidatesTokensDetails, "IMAGE");
+  if (!candidateText && !imageOut) imageOut = usage.candidatesTokenCount ?? 0;
+  const round = (n: number) => Number(n.toFixed(4));
+  const breakdown = {
+    text_input_tokens: textIn,
+    image_input_tokens: imageIn,
+    text_output_tokens: textOut,
+    image_output_tokens: imageOut,
+    text_input_usd: round((textIn * rates.text_in_per_1m) / 1e6),
+    image_input_usd: round((imageIn * (rates.image_in_per_1m ?? 0)) / 1e6),
+    text_output_usd: round((textOut * (rates.text_out_per_1m ?? 0)) / 1e6),
+    image_output_usd: round((imageOut * rates.image_out_per_1m) / 1e6),
+    rates_per_1m_tokens: rates,
+  };
   return {
-    total: round4(total),
-    breakdown: {
-      text_input_tokens: textIn,
-      image_input_tokens: imageIn,
-      text_output_tokens: textOut,
-      image_output_tokens: imageOut,
-      text_input_usd: round4(textInUsd),
-      image_input_usd: round4(imageInUsd),
-      text_output_usd: round4(textOutUsd),
-      image_output_usd: round4(imageOutUsd),
-      rates_per_1m_tokens: rates,
-    },
+    total: round(
+      breakdown.text_input_usd +
+        breakdown.image_input_usd +
+        breakdown.text_output_usd +
+        breakdown.image_output_usd,
+    ),
+    breakdown,
     pricing_source_date: PRICING_SOURCE_DATE,
-    note:
-      "Estimate computed from Gemini usageMetadata × verified per-token rates. The Gemini API does not return USD; this is a client-side calculation.",
+    note: "Estimate uses Gemini usageMetadata and Google published token prices; Google does not return a USD charge.",
   };
 }
 
-export class GeminiClient {
-  private apiKey: string;
-  private baseUrl: string;
-  private filesBaseUrl: string;
-  private axios: AxiosInstance;
-  private fileCache: Map<string, string>; // hash -> fileUri cache
+function assertText(
+  value: unknown,
+  field: string,
+  maximum = MAX_PROMPT_CHARS,
+): asserts value is string {
+  if (typeof value !== "string" || !value.trim() || value.length > maximum)
+    throw new Error(`Invalid ${field}`);
+}
+export function normalizeFileUri(value: unknown): string {
+  assertText(value, "file URI", 2048);
+  const name = value.startsWith("https://generativelanguage.googleapis.com/v1beta/")
+    ? value.slice("https://generativelanguage.googleapis.com/v1beta/".length)
+    : value;
+  if (!/^files\/[A-Za-z0-9_-]+$/.test(name)) throw new Error("Invalid Google Files URI");
+  return `https://generativelanguage.googleapis.com/v1beta/${name}`;
+}
+export function validateReferenceImage(
+  ref: unknown,
+): asserts ref is ReferenceImage {
+  if (!ref || typeof ref !== "object")
+    throw new Error("Invalid reference image");
+  const value = ref as ReferenceImage;
+  if (!["url", "file_uri", "file_path", "inline"].includes(value.source))
+    throw new Error("Invalid reference image source");
+  if (
+    value.mimeType &&
+    !["image/jpeg", "image/png", "image/webp", "image/gif"].includes(
+      value.mimeType,
+    )
+  )
+    throw new Error("Unsupported reference image MIME type");
+  if (value.source === "url") {
+    assertText(value.url, "reference URL", 2048);
+    let parsed: URL;
+    try {
+      parsed = new URL(value.url!);
+    } catch {
+      throw new Error("Invalid reference URL");
+    }
+    if (parsed.protocol !== "https:")
+      throw new Error("Reference URLs must use HTTPS");
+  }
+  if (value.source === "file_uri") normalizeFileUri(value.fileUri);
+  if (value.source === "file_path")
+    assertText(value.filePath, "file path", 2048);
+  if (value.source === "inline") {
+    assertText(
+      value.base64,
+      "inline reference",
+      Math.ceil((MAX_REFERENCE_BYTES * 4) / 3) + 4,
+    );
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value.base64!))
+      throw new Error("Inline reference is not valid base64");
+  }
+}
+export function validateImageRequest(
+  request: GenerateImageRequest | EditImageRequest,
+  defaults: RuntimeDefaults,
+) {
+  assertText(request.prompt, "prompt");
+  const model = resolveModel(request.model ?? defaults.model);
+  const imageSize = request.imageSize ?? defaults.imageSize;
+  const aspectRatio = request.aspectRatio ?? DEFAULT_ASPECT_RATIO;
+  const capabilities = MODEL_CAPABILITIES[model];
+  if (!capabilities.sizes.includes(imageSize))
+    throw new Error(`${imageSize} is not supported by ${model}`);
+  if (!capabilities.aspectRatios.includes(aspectRatio))
+    throw new Error(`${aspectRatio} is not supported by ${model}`);
+  if ("referenceImages" in request && request.referenceImages !== undefined) {
+    if (
+      !Array.isArray(request.referenceImages) ||
+      request.referenceImages.length > MAX_REFERENCE_IMAGES
+    )
+      throw new Error(`Use at most ${MAX_REFERENCE_IMAGES} reference images`);
+    request.referenceImages.forEach(validateReferenceImage);
+  }
+  if ("inputImage" in request) validateReferenceImage(request.inputImage);
+  if ("maskImage" in request && request.maskImage !== undefined) {
+    validateReferenceImage(request.maskImage);
+  }
+  if (
+    request.seed !== undefined &&
+    (!Number.isInteger(request.seed) ||
+      request.seed < 0 ||
+      request.seed > 0x7fffffff)
+  )
+    throw new Error("seed must be a non-negative 32-bit integer");
+  return { model, imageSize, aspectRatio };
+}
+function providerError(error: unknown, operation: string): Error {
+  if (axios.isAxiosError(error)) {
+    if (error.code === "ECONNABORTED")
+      return new Error(`${operation} timed out`);
+    return new Error(
+      error.response?.status
+        ? `${operation} failed (HTTP ${error.response.status})`
+        : `${operation} failed`,
+    );
+  }
+  return error instanceof Error ? error : new Error(`${operation} failed`);
+}
 
-  constructor(apiKey: string) {
-    this.apiKey = apiKey;
-    this.baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
-    this.filesBaseUrl = 'https://generativelanguage.googleapis.com/upload/v1beta';
-    this.fileCache = new Map();
-    
-    this.axios = axios.create({
-      headers: {
-        'x-goog-api-key': this.apiKey,
-      },
+interface CacheEntry {
+  fileUri: string;
+  expiresAt: number;
+}
+export class GeminiClient {
+  private readonly api: AxiosInstance;
+  private readonly download: AxiosInstance;
+  private readonly fileCache = new Map<string, CacheEntry>();
+  private readonly baseUrl = "https://generativelanguage.googleapis.com/v1beta";
+  private readonly filesUrl =
+    "https://generativelanguage.googleapis.com/upload/v1beta/files";
+  constructor(
+    apiKey: string,
+    private readonly defaults: RuntimeDefaults = getRuntimeDefaults(),
+  ) {
+    this.api = axios.create({
+      headers: { "x-goog-api-key": apiKey },
+      timeout: REQUEST_TIMEOUT_MS,
+      maxContentLength: MAX_PROVIDER_RESPONSE_BYTES,
+      maxBodyLength: MAX_REFERENCE_BYTES,
+      maxRedirects: 0,
+    });
+    this.download = axios.create({
+      httpsAgent: createPublicImageAgent(),
+      proxy: false,
+      timeout: REQUEST_TIMEOUT_MS,
+      maxContentLength: MAX_REFERENCE_BYTES,
+      maxRedirects: 0,
     });
   }
+  async uploadFile(
+    filePath: string,
+    displayName?: string,
+  ): Promise<UploadFileResponse> {
+    assertText(filePath, "file path", 2048);
+    const { bytes, mimeType } = readLocalImage(filePath);
+    return this.uploadBytes(bytes, mimeType, displayName ?? path.basename(filePath));
+  }
 
-  /**
-   * Upload a file to Google's Files API
-   * Returns a fileUri that can be used in generate requests
-   */
-  async uploadFile(filePath: string, displayName?: string): Promise<UploadFileResponse> {
+  async listFiles() {
     try {
-      process.stderr.write(`Uploading file: ${filePath}\n`);
-
-      // Read file
-      const fileBuffer = fs.readFileSync(filePath);
-      const fileName = path.basename(filePath);
-      const mimeType = this.getMimeType(filePath);
-
-      // Create form data
-      const formData = new FormData();
-      
-      // Add metadata
-      const metadata = {
-        file: {
-          displayName: displayName || fileName,
-        }
+      const response = await this.api.get<{
+        files?: UploadFileResponse["file"][];
+        nextPageToken?: string;
+      }>(`${this.baseUrl}/files`);
+      return {
+        files: (response.data.files ?? []).map(
+          ({
+            name,
+            displayName,
+            mimeType,
+            sizeBytes,
+            expirationTime,
+            state,
+            uri,
+          }) => ({
+            name,
+            displayName,
+            mimeType,
+            sizeBytes,
+            expirationTime,
+            state,
+            uri,
+          }),
+        ),
+        nextPageToken: response.data.nextPageToken,
       };
-      formData.append('metadata', JSON.stringify(metadata), {
-        contentType: 'application/json',
-      });
-
-      // Add file data
-      formData.append('file', fileBuffer, {
-        filename: fileName,
-        contentType: mimeType,
-      });
-
-      // Upload
-      const response = await axios.post<UploadFileResponse>(
-        `${this.filesBaseUrl}/files`,
-        formData,
+    } catch (error) {
+      throw providerError(error, "Listing files");
+    }
+  }
+  async deleteFile(name: string) {
+    assertText(name, "file name", 1024);
+    if (!/^files\/[A-Za-z0-9_-]+$/.test(name))
+      throw new Error("Invalid file name");
+    try {
+      await this.api.delete(`${this.baseUrl}/${name}`);
+      for (const [hash, cached] of this.fileCache) {
+        if (cached.fileUri === `${this.baseUrl}/${name}`) this.fileCache.delete(hash);
+      }
+    } catch (error) {
+      throw providerError(error, "Deleting file");
+    }
+  }
+  async resolveReferenceImage(
+    ref: ReferenceImage,
+  ): Promise<{ mimeType: string; fileUri: string }> {
+    validateReferenceImage(ref);
+    if (ref.source === "file_uri")
+      return { mimeType: ref.mimeType ?? "image/png", fileUri: normalizeFileUri(ref.fileUri) };
+    let bytes: Buffer;
+    let mimeType = ref.mimeType ?? "image/png";
+    if (ref.source === "url") {
+      try {
+        validatePublicImageUrl(ref.url!);
+        const response = await this.download.get<ArrayBuffer>(ref.url!, {
+          responseType: "arraybuffer",
+        });
+        bytes = Buffer.from(response.data);
+        const contentType = response.headers["content-type"];
+        mimeType =
+          (typeof contentType === "string"
+            ? contentType.split(";")[0]
+            : undefined) ?? mimeType;
+      } catch (error) {
+        throw providerError(error, "Reference download");
+      }
+    } else if (ref.source === "file_path") {
+      ({ bytes, mimeType } = readLocalImage(ref.filePath!));
+    } else bytes = Buffer.from(ref.base64!, "base64");
+    if (!bytes.length || bytes.length > MAX_REFERENCE_BYTES)
+      throw new Error(
+        `Reference images must be no larger than ${MAX_REFERENCE_BYTES} bytes`,
+      );
+    if (
+      !["image/jpeg", "image/png", "image/webp", "image/gif"].includes(mimeType)
+    )
+      throw new Error("Unsupported reference image MIME type");
+    mimeType = imageMimeType(bytes);
+    const hash = crypto.createHash("sha256").update(bytes).digest("hex");
+    const cached = this.fileCache.get(hash);
+    if (cached && cached.expiresAt > Date.now())
+      return { mimeType, fileUri: cached.fileUri };
+    this.fileCache.delete(hash);
+    const uploaded = await this.uploadBytes(bytes, mimeType);
+    this.fileCache.set(hash, {
+      fileUri: uploaded.file.uri,
+      expiresAt: Date.now() + 45 * 60 * 60 * 1000,
+    });
+    return { mimeType, fileUri: uploaded.file.uri };
+  }
+  private async uploadBytes(
+    bytes: Buffer,
+    mimeType: string,
+    displayName = "reference-image",
+  ): Promise<UploadFileResponse> {
+    try {
+      const start = await this.api.post(
+        this.filesUrl,
+        { file: { display_name: displayName.slice(0, 256) } },
         {
           headers: {
-            ...formData.getHeaders(),
-            'x-goog-api-key': this.apiKey,
+            "Content-Type": "application/json",
+            "X-Goog-Upload-Protocol": "resumable",
+            "X-Goog-Upload-Command": "start",
+            "X-Goog-Upload-Header-Content-Length": String(bytes.length),
+            "X-Goog-Upload-Header-Content-Type": mimeType,
           },
-        }
+        },
       );
-
-      process.stderr.write(`File uploaded successfully: ${response.data.file.uri}\n`);
-      process.stderr.write(`File will expire at: ${response.data.file.expirationTime}\n`);
-
-      return response.data;
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        const errorMsg = error.response?.data?.error?.message || error.message;
-        process.stderr.write(`Upload failed: ${errorMsg}\n`);
-        throw new Error(`File upload failed: ${errorMsg}`);
-      }
-      throw error;
-    }
-  }
-
-  /**
-   * List uploaded files
-   */
-  async listFiles(): Promise<any> {
-    try {
-      const response = await this.axios.get(`${this.baseUrl}/files`);
-      return response.data;
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        throw new Error(`Failed to list files: ${error.response?.data?.error?.message || error.message}`);
-      }
-      throw error;
-    }
-  }
-
-  /**
-   * Delete an uploaded file
-   */
-  async deleteFile(fileName: string): Promise<void> {
-    try {
-      await this.axios.delete(`${this.baseUrl}/${fileName}`);
-      process.stderr.write(`File deleted: ${fileName}\n`);
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        throw new Error(`Failed to delete file: ${error.response?.data?.error?.message || error.message}`);
-      }
-      throw error;
-    }
-  }
-
-  /**
-   * Resolve a reference image to a fileUri (token-efficient)
-   * Downloads URLs, uploads files, caches by hash
-   */
-  private async resolveReferenceImage(ref: ReferenceImage): Promise<{ mimeType: string; fileUri: string }> {
-    // Already a fileUri - just use it
-    if (ref.source === 'file_uri' && ref.fileUri) {
-      return {
-        mimeType: ref.mimeType || 'image/png',
-        fileUri: ref.fileUri,
-      };
-    }
-
-    let bytes: Buffer | null = null;
-    let mimeType = ref.mimeType || 'image/png';
-
-    // Download from URL
-    if (ref.source === 'url' && ref.url) {
-      process.stderr.write(`Downloading reference from URL: ${ref.url}\n`);
-      const response = await axios.get(ref.url, { responseType: 'arraybuffer' });
-      mimeType = response.headers['content-type'] || mimeType;
-      bytes = Buffer.from(response.data);
-    }
-    // Read from file path
-    else if (ref.source === 'file_path' && ref.filePath) {
-      process.stderr.write(`Reading reference from file: ${ref.filePath}\n`);
-      bytes = fs.readFileSync(ref.filePath);
-      mimeType = this.getMimeType(ref.filePath);
-    }
-    // Inline base64
-    else if (ref.source === 'inline' && ref.base64) {
-      process.stderr.write(`Using inline reference (base64)\n`);
-      bytes = Buffer.from(ref.base64, 'base64');
-    }
-
-    if (!bytes) {
-      throw new Error('Invalid reference image: no valid source provided');
-    }
-
-    // Check cache by content hash (avoid re-uploading same image)
-    const hash = crypto.createHash('sha256').update(bytes).digest('hex');
-    if (this.fileCache.has(hash)) {
-      const cachedUri = this.fileCache.get(hash)!;
-      process.stderr.write(`Using cached fileUri for hash ${hash.substring(0, 8)}...: ${cachedUri}\n`);
-      return { mimeType, fileUri: cachedUri };
-    }
-
-    // Upload to Files API
-    process.stderr.write(`Uploading ${(bytes.length / 1024).toFixed(2)} KB to Files API...\n`);
-    const fileUri = await this.uploadBytes(bytes, mimeType);
-    
-    // Cache for future use
-    this.fileCache.set(hash, fileUri);
-    process.stderr.write(`Cached fileUri for future use: ${fileUri}\n`);
-
-    return { mimeType, fileUri };
-  }
-
-  /**
-   * Upload raw bytes to Files API and return fileUri
-   */
-  private async uploadBytes(bytes: Buffer, mimeType: string): Promise<string> {
-    try {
-      const response = await axios.post(
-        `${this.filesBaseUrl}/files`,
+      const uploadUrl = start.headers["x-goog-upload-url"];
+      if (typeof uploadUrl !== "string")
+        throw new Error("Upload did not provide a resumable URL");
+      const parsedUploadUrl = new URL(uploadUrl);
+      if (
+        parsedUploadUrl.protocol !== "https:" ||
+        parsedUploadUrl.origin !== "https://generativelanguage.googleapis.com" ||
+        parsedUploadUrl.username !== "" || parsedUploadUrl.password !== "" ||
+        !parsedUploadUrl.pathname.startsWith("/upload/")
+      )
+        throw new Error("Upload returned an invalid resumable URL");
+      const complete = await this.api.post<UploadFileResponse>(
+        uploadUrl,
         bytes,
         {
           headers: {
-            'x-goog-api-key': this.apiKey,
-            'Content-Type': mimeType,
+            "Content-Type": mimeType,
+            "Content-Length": String(bytes.length),
+            "X-Goog-Upload-Offset": "0",
+            "X-Goog-Upload-Command": "upload, finalize",
           },
-        }
-      );
-
-      const uri = response.data.file?.uri;
-      if (!uri) {
-        throw new Error('Files API upload failed: no URI returned');
-      }
-
-      return uri;
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        throw new Error(`Upload failed: ${error.response?.data?.error?.message || error.message}`);
-      }
-      throw error;
-    }
-  }
-
-  /**
-   * Generate an image using Nano Banana (token-efficient with reference images)
-   */
-  async generateImage(request: GenerateImageRequest): Promise<GenerateImageResponse & { usedFileUris?: string[]; cost_estimate_usd?: GeminiCostEstimate | null }> {
-    try {
-      process.stderr.write(`\n🎨 Generating image with prompt: ${request.prompt}\n`);
-
-      const parts: any[] = [{ text: request.prompt }];
-      const usedFileUris: string[] = [];
-
-      // Process reference images (token-efficient: upload and use fileUri)
-      if (request.referenceImages && request.referenceImages.length > 0) {
-        process.stderr.write(`Processing ${request.referenceImages.length} reference image(s)...\n`);
-        
-        for (const ref of request.referenceImages) {
-          const resolved = await this.resolveReferenceImage(ref);
-          parts.push({
-            fileData: {
-              mimeType: resolved.mimeType,
-              fileUri: resolved.fileUri,
-            },
-          });
-          usedFileUris.push(resolved.fileUri);
-        }
-      }
-
-      // Select model. Fixing only the DEFAULT was not enough: a caller that
-      // explicitly names the legacy alias still got the weak model, because we
-      // passed the name through verbatim. resolveModel() maps it. See MODEL_ALIASES.
-      const model = resolveModel(request.model);
-      process.stderr.write(`Using model: ${model}\n`);
-
-      // Build generation config
-      const imageConfig: any = {
-        aspectRatio: request.aspectRatio || '16:9',
-        imageSize: request.imageSize || '2K',
-      };
-
-      // Do NOT send outputMimeType. Google rejects it inside image_config
-      // ("Unknown name \"outputMimeType\" at 'generation_config.image_config'")
-      // and the entire call fails. `mimeType` is still accepted on the request for
-      // backwards compatibility, but is deliberately not forwarded to the API.
-
-      const generationConfig: any = {
-        responseModalities: ['IMAGE'],
-        imageConfig,
-      };
-
-      if (request.seed !== undefined) {
-        generationConfig.seed = request.seed;
-      }
-      if (request.negativeSeed !== undefined) {
-        imageConfig.negativeSeed = request.negativeSeed;
-      }
-      // Note: referenceMode and referenceStrength are not currently supported by the API
-      // These parameters are accepted for future compatibility but not sent to the API
-
-      // Build the request
-      const generateRequest = {
-        contents: [{ parts }],
-        generationConfig,
-      };
-
-      process.stderr.write(`Calling ${model}...\n`);
-
-      // Call Gemini API
-      const response = await this.axios.post<GenerateImageResponse>(
-        `${this.baseUrl}/models/${model}:generateContent`,
-        generateRequest
-      );
-
-      process.stderr.write(`✅ Image generated successfully!\n`);
-
-      return {
-        ...response.data,
-        usedFileUris,
-        cost_estimate_usd: estimateGeminiCost(model, response.data.usageMetadata),
-      };
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        const errorMsg = error.response?.data?.error?.message || error.message;
-        process.stderr.write(`❌ Generation failed: ${errorMsg}\n`);
-        if (error.response?.data) {
-          process.stderr.write(`Full error: ${JSON.stringify(error.response.data, null, 2)}\n`);
-        }
-        throw new Error(`Image generation failed: ${errorMsg}`);
-      }
-      throw error;
-    }
-  }
-
-  /**
-   * Edit an image (inpainting/outpainting with optional mask)
-   */
-  async editImage(request: EditImageRequest): Promise<GenerateImageResponse & { usedFileUris?: string[]; cost_estimate_usd?: GeminiCostEstimate | null }> {
-    try {
-      process.stderr.write(`\n✏️  Editing image with prompt: ${request.prompt}\n`);
-
-      const parts: any[] = [{ text: request.prompt }];
-      const usedFileUris: string[] = [];
-
-      // Resolve input image
-      const inputResolved = await this.resolveReferenceImage(request.inputImage);
-      parts.push({
-        fileData: {
-          mimeType: inputResolved.mimeType,
-          fileUri: inputResolved.fileUri,
         },
+      );
+      if (!complete.data.file?.uri)
+        throw new Error("Upload returned no file URI");
+      return complete.data;
+    } catch (error) {
+      throw providerError(error, "File upload");
+    }
+  }
+  async generateImage(request: GenerateImageRequest) {
+    const configuration = validateImageRequest(request, this.defaults);
+    const parts: Array<Record<string, unknown>> = [{ text: request.prompt }];
+    const usedFileUris: string[] = [];
+    for (const reference of request.referenceImages ?? []) {
+      const resolved = await this.resolveReferenceImage(reference);
+      parts.push({
+        fileData: { mimeType: resolved.mimeType, fileUri: resolved.fileUri },
       });
-      usedFileUris.push(inputResolved.fileUri);
-
-      // Resolve mask if provided
-      if (request.maskImage) {
-        const maskResolved = await this.resolveReferenceImage(request.maskImage);
-        parts.push({
-          fileData: {
-            mimeType: maskResolved.mimeType,
-            fileUri: maskResolved.fileUri,
-          },
-        });
-        usedFileUris.push(maskResolved.fileUri);
-      }
-
-      // Select model. Fixing only the DEFAULT was not enough: a caller that
-      // explicitly names the legacy alias still got the weak model, because we
-      // passed the name through verbatim. resolveModel() maps it. See MODEL_ALIASES.
-      const model = resolveModel(request.model);
-      process.stderr.write(`Using model: ${model}\n`);
-
-      // Build generation config
-      const imageConfig: any = {
-        aspectRatio: request.aspectRatio || '16:9',
-        imageSize: request.imageSize || '2K',
+      usedFileUris.push(resolved.fileUri);
+    }
+    return this.call(configuration, parts, usedFileUris, request.seed);
+  }
+  async editImage(request: EditImageRequest) {
+    const configuration = validateImageRequest(request, this.defaults);
+    const input = await this.resolveReferenceImage(request.inputImage);
+    const parts: Array<Record<string, unknown>> = [
+      { text: request.prompt },
+      { fileData: { mimeType: input.mimeType, fileUri: input.fileUri } },
+    ];
+    const usedFileUris = [input.fileUri];
+    if (request.maskImage) {
+      const mask = await this.resolveReferenceImage(request.maskImage);
+      parts.push({
+        fileData: { mimeType: mask.mimeType, fileUri: mask.fileUri },
+      });
+      usedFileUris.push(mask.fileUri);
+    }
+    return this.call(configuration, parts, usedFileUris, request.seed);
+  }
+  private async call(
+    config: ReturnType<typeof validateImageRequest>,
+    parts: Array<Record<string, unknown>>,
+    usedFileUris: string[],
+    seed?: number,
+  ) {
+    try {
+      const imageConfig: Record<string, unknown> = {
+        aspectRatio: config.aspectRatio,
       };
-
-      // Do NOT send outputMimeType. Google rejects it inside image_config
-      // ("Unknown name \"outputMimeType\" at 'generation_config.image_config'")
-      // and the entire call fails. `mimeType` is still accepted on the request for
-      // backwards compatibility, but is deliberately not forwarded to the API.
-
-      const generationConfig: any = {
-        responseModalities: ['IMAGE'],
+      // Gemini 2.5 Flash Image has a fixed approximately 1K output and rejects imageSize.
+      if (config.model !== "gemini-2.5-flash-image") {
+        imageConfig.imageSize = config.imageSize;
+      }
+      const generationConfig: Record<string, unknown> = {
+        responseModalities: ["IMAGE"],
         imageConfig,
       };
-
-      if (request.seed !== undefined) {
-        generationConfig.seed = request.seed;
-      }
-
-      // Build the request
-      const generateRequest = {
-        contents: [{ parts }],
-        generationConfig,
-      };
-
-      process.stderr.write(`Calling ${model} for editing...\n`);
-
-      // Call Gemini API
-      const response = await this.axios.post<GenerateImageResponse>(
-        `${this.baseUrl}/models/${model}:generateContent`,
-        generateRequest
+      if (seed !== undefined) generationConfig.seed = seed;
+      const response = await this.api.post<GenerateImageResponse>(
+        `${this.baseUrl}/models/${config.model}:generateContent`,
+        { contents: [{ parts }], generationConfig },
       );
-
-      process.stderr.write(`✅ Image edited successfully!\n`);
-
+      if (!extractImage(response.data))
+        throw new Error(
+          "Provider returned no image; it may have blocked or declined the request",
+        );
       return {
         ...response.data,
         usedFileUris,
-        cost_estimate_usd: estimateGeminiCost(model, response.data.usageMetadata),
+        model: config.model,
+        cost_estimate_usd: estimateGeminiCost(
+          config.model,
+          response.data.usageMetadata,
+        ),
       };
     } catch (error) {
-      if (axios.isAxiosError(error)) {
-        const errorMsg = error.response?.data?.error?.message || error.message;
-        process.stderr.write(`❌ Edit failed: ${errorMsg}\n`);
-        if (error.response?.data) {
-          process.stderr.write(`Full error: ${JSON.stringify(error.response.data, null, 2)}\n`);
-        }
-        throw new Error(`Image edit failed: ${errorMsg}`);
-      }
-      throw error;
+      if (
+        error instanceof Error &&
+        error.message.startsWith("Provider returned no image")
+      )
+        throw error;
+      throw providerError(error, "Image generation");
     }
   }
 
-  /**
-   * Get MIME type from file extension
-   */
-  private getMimeType(filePath: string): string {
-    const ext = path.extname(filePath).toLowerCase();
-    const mimeTypes: Record<string, string> = {
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png',
-      '.gif': 'image/gif',
-      '.webp': 'image/webp',
-      '.bmp': 'image/bmp',
-    };
-    return mimeTypes[ext] || 'application/octet-stream';
-  }
 }
-
+export function extractImage(response: GenerateImageResponse) {
+  for (const candidate of response.candidates ?? [])
+    for (const part of candidate.content?.parts ?? [])
+      if (!(part as { thought?: boolean }).thought && part.inlineData?.data)
+        return part.inlineData;
+  return undefined;
+}
