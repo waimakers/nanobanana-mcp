@@ -1,213 +1,54 @@
-# 🍌 Nanobanana MCP - Quick Reference
+# Nanobanana MCP quick reference
 
-## 🚀 One-Minute Setup
+Set a dedicated key before launching the MCP client:
 
 ```bash
-cd nanobanana-mcp
-npm install
-npm run build
-echo "GEMINI_API_KEY=your_key_here" > .env
+export NANOBANANA_COHORT_API_KEY="your-dedicated-cohort-key"
 ```
 
-Add to `~/.cursor/mcp.json`:
+The checked-in [`.mcp.json`](.mcp.json) maps that variable to `GEMINI_IMAGE_API_KEY`. The server also accepts `GEMINI_API_KEY` when used outside the cohort configuration.
+
+Use Flash at 1K for workshop throughput while retaining the existing default for other installations:
+
+```bash
+export NANOBANANA_DEFAULT_MODEL="gemini-3.1-flash-image"
+export NANOBANANA_DEFAULT_IMAGE_SIZE="1K"
+```
+
+Generate:
 
 ```json
 {
-  "mcpServers": {
-    "nanobanana": {
-      "command": "node",
-      "args": ["/path/to/nanobanana-mcp/dist/index.js"],
-      "env": { "GEMINI_API_KEY": "your_key" }
-    }
-  }
-}
-```
-
-Restart Cursor. Done! ✅
-
----
-
-## 💬 Common Commands
-
-### Simple Generation
-
-```
-Generate a modern tech logo in 1:1 format and save to Pictures folder
-```
-
-### With Style Reference (Token-Efficient!)
-
-```
-Create a business card using this style: /path/to/style.png
-```
-
-### Multiple References
-
-```
-Generate a hero banner combining styles from image1.png and image2.png
-```
-
-### Image Editing
-
-```
-Edit photo.jpg and replace the background with a beach scene
-```
-
----
-
-## 📋 Tool Quick Reference
-
-### generate_image
-
-**Most Common Use:**
-
-```json
-{
-  "prompt": "description",
-  "referenceImages": [{"source": "url", "url": "https://..."}],
-  "aspectRatio": "16:9",
+  "prompt": "A warm editorial illustration of a banana workshop, clear typography, 16:9",
+  "model": "gemini-3.1-flash-image",
   "imageSize": "1K",
-  "outputPath": "C:\\output.png"
+  "aspectRatio": "16:9",
+  "outputPath": "generated/workshop.png"
 }
 ```
 
-**Key Options:**
-- Models: `nano-banana-pro-preview`, `gemini-2.5-flash-image`, `gemini-3-pro-image-preview`
-- Ratios: `1:1`, `16:9`, `9:16`, `3:4`, `4:3`
-- Sizes: `512x512`, `1K`, `2K`, `4K`
-
-### edit_image
+Edit with an image reference:
 
 ```json
 {
-  "prompt": "edit instructions",
-  "inputImage": {"source": "file_path", "filePath": "..."},
-  "outputPath": "C:\\edited.png"
+  "prompt": "Replace the background with a bright studio setting",
+  "inputImage": { "source": "file_path", "filePath": "input.png" },
+  "model": "gemini-3.1-flash-image",
+  "imageSize": "1K"
 }
 ```
 
-### upload_image (for reuse)
+Use an existing Google Files URI:
 
 ```json
 {
-  "source": "file_path",
-  "filePath": "C:\\ref.png"
+  "prompt": "Create a matching poster",
+  "referenceImages": [{ "source": "file_uri", "fileUri": "files/example" }]
 }
 ```
 
-Returns `fileUri` valid for 48 hours!
+Stable choices are `gemini-3.1-flash-image`, `gemini-3-pro-image`, and `gemini-3.1-flash-lite-image`. The legacy `nano-banana-pro-preview` remains available and maps to `gemini-3-pro-image-preview`; preview and 2.5 choices remain supported for existing callers.
 
----
+`maskImage` and other references guide generative output only. They are not an exact selection mask. The shared cohort key makes `list_uploaded_files` and `delete_uploaded_file` visible to everyone using the key; do not upload confidential images.
 
-## 🎯 Token Efficiency Tips
-
-### ✅ DO THIS (Token-Efficient)
-
-```json
-{
-  "referenceImages": [
-    {"source": "url", "url": "https://..."}
-  ]
-}
-```
-
-**Cost:** ~10 tokens
-
-### ⚠️ AVOID THIS (Token-Heavy)
-
-```json
-{
-  "referenceImages": [
-    {"source": "inline", "base64": "iVBORw0KGgoAAAA..."}
-  ]
-}
-```
-
-**Cost:** ~1,500 tokens
-
-### 🚀 BEST FOR REPEATED USE
-
-```json
-// Step 1: Upload once
-upload_image {"source": "file_path", "filePath": "..."}
-// Returns: files/abc123
-
-// Step 2: Reuse many times (48 hours)
-{
-  "referenceImages": [
-    {"source": "file_uri", "fileUri": "files/abc123"}
-  ]
-}
-```
-
-**Cost:** ~10 tokens per use, zero upload!
-
----
-
-## 🔧 Troubleshooting
-
-### "API key not found"
-
-```bash
-echo "GEMINI_API_KEY=your_key" > .env
-```
-
-### "Server not starting"
-
-1. Check `.env` exists
-2. Verify API key is valid
-3. Restart Cursor
-4. Check `~/.cursor/mcp.json` path is correct
-
-### "File upload failed"
-
-- Use absolute paths: `C:\Users\...`
-- Check file exists
-- Max 20MB per file
-- Supported: JPG, PNG, GIF, WebP
-
-### "Generation slow"
-
-- Use `1K` instead of `4K`
-- Try `gemini-2.5-flash-image` for speed
-- Check internet connection
-
----
-
-## 📊 Quick Metrics
-
-| Feature | Value |
-|---------|-------|
-| Upload speed | < 1s (100KB) |
-| Generation | 5-8s (1K) |
-| Token savings | 97%+ vs base64 |
-| Cache validity | 48 hours |
-| Max file size | 20 MB |
-| Models | 3 available |
-
----
-
-## 🎨 Example Prompts
-
-```
-Generate a minimalist tech startup logo with geometric shapes
-Create a professional business card with clean typography
-Make a social media banner in a vibrant, modern style
-Design a product mockup with realistic lighting
-Create an app icon with rounded corners and gradient
-Generate a hero image for a landing page
-Make a poster with bold typography and high contrast
-```
-
----
-
-## 🔗 Resources
-
-- API Key: https://aistudio.google.com/app/apikey
-- Full Docs: `README-COMPREHENSIVE.md`
-- Implementation: `IMPLEMENTATION-SUMMARY.md`
-
----
-
-**Quick Start → Full Docs → Build Amazing Images! 🎨**
-
+With the cohort configuration, paths must stay inside the workspace where you launch the client. Copy input images there first. Existing output files are not overwritten. URL references must be direct public HTTPS images; redirects and private-network addresses are rejected.

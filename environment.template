@@ -1,0 +1,10 @@
+# Set this in the shell or client environment. Do not commit a real key.
+export NANOBANANA_COHORT_API_KEY="replace-with-dedicated-cohort-key"
+
+# Optional cohort defaults. Omit both to retain established Pro-preview / 2K behavior.
+# export NANOBANANA_DEFAULT_MODEL="gemini-3.1-flash-image"
+# export NANOBANANA_DEFAULT_IMAGE_SIZE="1K"
+
+# These guards are enabled by the cohort .mcp.json.
+# export NANOBANANA_WORKSPACE_ROOT="."
+# export NANOBANANA_ALLOW_OVERWRITE="0"
