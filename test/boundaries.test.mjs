@@ -121,7 +121,7 @@ test('real stdio client rejects invalid requests before any provider call', { ti
   const client = new Client({ name: 'boundary-test', version: '1' });
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ['--import', fileURLToPath(new URL('./fixtures/block-network.mjs', import.meta.url)), fileURLToPath(new URL('../dist/index.js', import.meta.url))],
+    args: ['--import', new URL('./fixtures/block-network.mjs', import.meta.url).href, fileURLToPath(new URL('../dist/index.js', import.meta.url))],
     env: { NANOBANANA_WORKSPACE_ROOT: workspace, NANOBANANA_ALLOW_OVERWRITE: '0', GEMINI_IMAGE_API_KEY: 'test-key-not-used', NANOBANANA_DEFAULT_MODEL: 'gemini-3.1-flash-image', NANOBANANA_DEFAULT_IMAGE_SIZE: '1K' },
     stderr: 'pipe',
   });
